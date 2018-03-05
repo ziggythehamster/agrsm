@@ -190,7 +190,7 @@ int __init modem_init_module (void)
   ret = wrap_linux_modem_init ();
   if (!ret) {
 	  printk("<1>Loading module %s version %s (%s)\n", modem_name, modem_version, modem_revdate);
-	  add_taint(TAINT_PROPRIETARY_MODULE);
+	  add_taint(TAINT_PROPRIETARY_MODULE, LOCKDEP_STILL_OK);
   }
   else
 	  printk("<1>Could not detect Agere soft modem device\n Agere soft modem driver not loaded\n");
