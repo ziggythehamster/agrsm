@@ -70,13 +70,14 @@ static char *serialif_name = "Agere Modem Interface driver";
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/console.h>
 #include <linux/sysrq.h>
 #include <linux/serial_reg.h>
 #include <linux/serial.h>
-#include <linux/serialP.h>
+#include "serialP.h"
 #include <linux/delay.h>
 
 #include <asm/io.h>
@@ -180,7 +181,7 @@ static int force_rsa[PORT_RSA_MAX];
 #endif /* CONFIG_SERIAL_8250_RSA  */
 #endif
 
-struct uart_8250_port {
+struct agrsm_uart_8250_port {
 	struct uart_port	port;
 	struct timer_list	timer;		/* "no irq" timer */
 	struct list_head	list;		/* ports on this IRQ */
@@ -203,6 +204,12 @@ struct uart_8250_port {
 struct irq_info {
 	spinlock_t		lock;
 	struct list_head	*head;
+};
+
+struct serial_uart_config {
+	char	*name;
+	int	dfl_xmit_fifo_size;
+	int	flags;
 };
 
 /*
@@ -282,13 +289,13 @@ static void agr_rs_interrupt (unsigned long);
 static int intf_flag = 0;
 static int uart_flag = 0;
 static int tx_empty_flag = 0;
-static struct uart_8250_port serial8250_ports[UART_NR];
+static struct agrsm_uart_8250_port serial8250_ports[UART_NR];
 //bala InterModule Fix
 unsigned int start_int=0;
 struct timer_list serial_timer;
 
 #define _INLINE_
-static _INLINE_ unsigned int serial_in(struct uart_8250_port *up, int offset)
+static _INLINE_ unsigned int serial_in(struct agrsm_uart_8250_port *up, int offset)
 {
 	
 //	printk("Entering proprietary code: Offset is: %d...\n",offset);
@@ -297,7 +304,7 @@ static _INLINE_ unsigned int serial_in(struct uart_8250_port *up, int offset)
 }
 
 	static _INLINE_ void
-serial_out(struct uart_8250_port *up, int offset, int value)
+serial_out(struct agrsm_uart_8250_port *up, int offset, int value)
 {
 	
 	lt_modem_ops.write_vuart_register(offset, value);
@@ -316,7 +323,7 @@ serial_out(struct uart_8250_port *up, int offset, int value)
 /*
  * For the 16C950
  */
-static void serial_icr_write(struct uart_8250_port *up, int offset, int value)
+static void serial_icr_write(struct agrsm_uart_8250_port *up, int offset, int value)
 {
 	//printk("%s offset %d value 0x%02x\n",__FUNCTION__,offset,value);
 	serial_out(up, UART_SCR, offset);
@@ -324,7 +331,7 @@ static void serial_icr_write(struct uart_8250_port *up, int offset, int value)
 }
 
 #if defined(NDZ)
-static unsigned int serial_icr_read(struct uart_8250_port *up, int offset)
+static unsigned int serial_icr_read(struct agrsm_uart_8250_port *up, int offset)
 {
 	unsigned int value;
 
@@ -345,7 +352,7 @@ static unsigned int serial_icr_read(struct uart_8250_port *up, int offset)
  * Attempts to turn on the RSA FIFO.  Returns zero on failure.
  * We set the port uart clock rate if we succeed.
  */
-static int __enable_rsa(struct uart_8250_port *up)
+static int __enable_rsa(struct agrsm_uart_8250_port *up)
 {
 	unsigned char mode;
 	int result;
@@ -366,7 +373,7 @@ static int __enable_rsa(struct uart_8250_port *up)
 	return result;
 }
 
-static void enable_rsa(struct uart_8250_port *up)
+static void enable_rsa(struct agrsm_uart_8250_port *up)
 {
 	
 	if (up->port.type == PORT_RSA) {
@@ -386,7 +393,7 @@ static void enable_rsa(struct uart_8250_port *up)
  * the caller is expected to preserve this behaviour by grabbing
  * the spinlock before calling this function.
  */
-static void disable_rsa(struct uart_8250_port *up)
+static void disable_rsa(struct agrsm_uart_8250_port *up)
 {
 	unsigned char mode;
 	int result;
@@ -417,7 +424,7 @@ static void disable_rsa(struct uart_8250_port *up)
  * This is a quickie test to see how big the FIFO is.
  * It doesn't work at all the time, more's the pity.
  */
-static int size_fifo(struct uart_8250_port *up)
+static int size_fifo(struct agrsm_uart_8250_port *up)
 {
 	unsigned char old_fcr, old_mcr, old_dll, old_dlm;
 	int count;
@@ -461,7 +468,7 @@ static int size_fifo(struct uart_8250_port *up)
  * 
  * What evil have men's minds wrought...
  */
-static void autoconfig_has_efr(struct uart_8250_port *up)
+static void autoconfig_has_efr(struct agrsm_uart_8250_port *up)
 {
 	unsigned char id1, id2, id3, rev, saved_dll, saved_dlm;
 
@@ -550,7 +557,7 @@ static void autoconfig_has_efr(struct uart_8250_port *up)
  * this category - the original 8250 and the 16450.  The
  * 16450 has a scratch register (accessible with LCR=0)
  */
-static void autoconfig_8250(struct uart_8250_port *up)
+static void autoconfig_8250(struct agrsm_uart_8250_port *up)
 {
 	unsigned char scratch, status1, status2;
 
@@ -574,7 +581,7 @@ static void autoconfig_8250(struct uart_8250_port *up)
  * we know the top two bits of the IIR are currently set.  The
  * EFR should contain zero.  Try to read the EFR.
  */
-static void autoconfig_16550a(struct uart_8250_port *up)
+static void autoconfig_16550a(struct agrsm_uart_8250_port *up)
 {
 	unsigned char status1, status2;
 
@@ -668,7 +675,7 @@ static void autoconfig_16550a(struct uart_8250_port *up)
  * whether or not this UART is a 16550A or not, since this will
  * determine whether or not we can use its FIFO features or not.
  */
-static void autoconfig(struct uart_8250_port *up, unsigned int probeflags)
+static void autoconfig(struct agrsm_uart_8250_port *up, unsigned int probeflags)
 {
 	printk("%s: probeflags 0x%04x lt_modem_res.BaseAddress 0x%04x\n",__FUNCTION__,probeflags,lt_modem_res.BaseAddress);
 	up->port.type     = PORT_16550A;
@@ -680,7 +687,7 @@ static void autoconfig(struct uart_8250_port *up, unsigned int probeflags)
 	return;
 }
 
-static void autoconfig_irq(struct uart_8250_port *up)
+static void autoconfig_irq(struct agrsm_uart_8250_port *up)
 {
 	unsigned char save_mcr, save_ier;
 	unsigned char save_ICP = 0;
@@ -732,7 +739,7 @@ static void autoconfig_irq(struct uart_8250_port *up)
 
 static void serial8250_stop_tx(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 
 	
 	if (up->ier & UART_IER_THRI) {
@@ -747,7 +754,7 @@ static void serial8250_stop_tx(struct uart_port *port)
 
 static void serial8250_start_tx(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 
 	
 	if (!(up->ier & UART_IER_THRI)) {
@@ -765,7 +772,7 @@ static void serial8250_start_tx(struct uart_port *port)
 
 static void serial8250_stop_rx(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 
 	
 	up->ier &= ~UART_IER_RLSI;
@@ -775,7 +782,7 @@ static void serial8250_stop_rx(struct uart_port *port)
 
 static void serial8250_enable_ms(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 
 	
 	up->ier |= UART_IER_MSI;
@@ -783,13 +790,9 @@ static void serial8250_enable_ms(struct uart_port *port)
 }
 //bala-dbg
 	static _INLINE_ void
-receive_chars(struct uart_8250_port *up, int *status, struct pt_regs *regs)
+receive_chars(struct agrsm_uart_8250_port *up, int *status, struct pt_regs *regs)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION (2, 6, 32)
-	struct tty_struct *tty = up->port.state->port.tty;
-#else
-	struct tty_struct *tty = up->port.info->port.tty;
-#endif
+	struct tty_port *tty = &up->port.state->port;
 	unsigned char ch, lsr = *status;
 	int max_count = 256;
 	char flag;
@@ -862,7 +865,7 @@ ignore_char:
 }
 
 
-static _INLINE_ void transmit_chars(struct uart_8250_port *up)
+static _INLINE_ void transmit_chars(struct agrsm_uart_8250_port *up)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION (2, 6, 32)
 	struct circ_buf *xmit = &up->port.state->xmit;
@@ -901,7 +904,7 @@ static _INLINE_ void transmit_chars(struct uart_8250_port *up)
 		serial8250_stop_tx(&up->port);
 }
 
-static _INLINE_ void check_modem_status(struct uart_8250_port *up)
+static _INLINE_ void check_modem_status(struct agrsm_uart_8250_port *up)
 {
 	int status;
 
@@ -930,7 +933,7 @@ static _INLINE_ void check_modem_status(struct uart_8250_port *up)
  * This handles the interrupt from one port.
  */
 	static inline void
-serial8250_handle_port(struct uart_8250_port *up, struct pt_regs *regs)
+serial8250_handle_port(struct agrsm_uart_8250_port *up, struct pt_regs *regs)
 {
 	unsigned int status;
 
@@ -966,7 +969,7 @@ serial8250_handle_port(struct uart_8250_port *up, struct pt_regs *regs)
  */
 static irqreturn_t serial8250_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct uart_8250_port *up = &serial8250_ports[PORT_LT_MODEM_IF];
+	struct agrsm_uart_8250_port *up = &serial8250_ports[PORT_LT_MODEM_IF];
 	unsigned int iir;
 	
 	iir = serial_in(up, UART_IIR);
@@ -998,7 +1001,7 @@ static irqreturn_t VMODEM_Hw_Int_Proc (int irq, void *dev_id, struct pt_regs * r
 }
 #endif
 
-static void serial_unlink_irq_chain(struct uart_8250_port *up)
+static void serial_unlink_irq_chain(struct agrsm_uart_8250_port *up)
 {
 	//printk("dummy %s:\n",__FUNCTION__);
 }
@@ -1011,7 +1014,7 @@ static unsigned int serial8250_tx_empty(struct uart_port *port)
 
 static unsigned int serial8250_get_mctrl(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned char status;
 	unsigned int ret = 0;
 
@@ -1039,7 +1042,7 @@ static unsigned int serial8250_get_mctrl(struct uart_port *port)
 
 static void serial8250_set_mctrl(struct uart_port *port, unsigned int mctrl)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned char mcr = 0;
 
 	
@@ -1061,7 +1064,7 @@ static void serial8250_set_mctrl(struct uart_port *port, unsigned int mctrl)
 
 static void serial8250_break_ctl(struct uart_port *port, int break_state)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned long flags;
 
 	
@@ -1076,7 +1079,7 @@ static void serial8250_break_ctl(struct uart_port *port, int break_state)
 
 static int serial8250_startup(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned long flags;
 	
 	if (intf_flag == 0)
@@ -1210,7 +1213,7 @@ static int serial8250_startup(struct uart_port *port)
 
 static void serial8250_shutdown(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned long flags;
 	start_int=0;
 
@@ -1287,7 +1290,7 @@ static unsigned int serial8250_get_divisor(struct uart_port *port, unsigned int 
 serial8250_set_termios(struct uart_port *port, struct ktermios *termios,
 		struct ktermios *old)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned char cval, fcr = 0;
 	unsigned long flags;
 	unsigned int baud, quot;
@@ -1428,7 +1431,7 @@ serial8250_set_termios(struct uart_port *port, struct ktermios *termios,
 serial8250_pm(struct uart_port *port, unsigned int state,
 		unsigned int oldstate)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	
 	if (state) {
 		/* sleep */
@@ -1502,7 +1505,7 @@ serial8250_pm(struct uart_port *port, unsigned int state,
  * 8250 ports, and then trying to get other resources as necessary?
  */
 	static int
-serial8250_request_std_resource(struct uart_8250_port *up, struct resource **res)
+serial8250_request_std_resource(struct agrsm_uart_8250_port *up, struct resource **res)
 {
 	unsigned int size = 8 << up->port.regshift;
 	int ret = 0;
@@ -1529,7 +1532,7 @@ serial8250_request_std_resource(struct uart_8250_port *up, struct resource **res
 
 static void serial8250_release_port(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	unsigned long start, offset = 0, size = 0;
 
 	
@@ -1568,7 +1571,7 @@ static void serial8250_release_port(struct uart_port *port)
 
 static int serial8250_request_port(struct uart_port *port)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	struct resource *res = NULL, *res_rsa = NULL;
 	int ret = 0;
 
@@ -1599,7 +1602,7 @@ static int serial8250_request_port(struct uart_port *port)
 
 static void serial8250_config_port(struct uart_port *port, int flags)
 {
-	struct uart_8250_port *up = (struct uart_8250_port *)port;
+	struct agrsm_uart_8250_port *up = (struct uart_8250_port *)port;
 	struct resource *res_std = NULL, *res_rsa = NULL;
 	int probeflags = PROBE_ANY;
 	//	int ret;
@@ -1706,7 +1709,7 @@ static struct uart_ops serial8250_pops = {
 static int serial8250_register_ports(struct uart_driver *drv)
 {
 
-	struct uart_8250_port *up = &serial8250_ports[PORT_LT_MODEM_IF];
+	struct agrsm_uart_8250_port *up = &serial8250_ports[PORT_LT_MODEM_IF];
 	int ret_val = 0;
 	
 	printk("%s: BaseAddress 0x%04x Irq %d \n",__FUNCTION__,lt_modem_res.BaseAddress,lt_modem_res.Irq);
@@ -1745,7 +1748,7 @@ static int serial8250_register_ports(struct uart_driver *drv)
 /*
  *	Wait for transmitter & holding register to empty
  */
-static inline void wait_for_xmitr(struct uart_8250_port *up)
+static inline void wait_for_xmitr(struct agrsm_uart_8250_port *up)
 {
 	unsigned int status, tmout = 10000;
 
@@ -1779,7 +1782,7 @@ static inline void wait_for_xmitr(struct uart_8250_port *up)
 	static void
 serial8250_console_write(struct console *co, const char *s, unsigned int count)
 {
-	struct uart_8250_port *up = &serial8250_ports[co->index];
+	struct agrsm_uart_8250_port *up = &serial8250_ports[co->index];
 	unsigned int ier;
 	int i;
 
